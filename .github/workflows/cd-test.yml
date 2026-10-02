@@ -90,7 +90,7 @@ jobs:
 
       # 전송 중 아티팩트가 변경되지 않았음을 증명한다.
       - name: Verify SHA-256
-        shell: pwsh
+        shell: powershell
         run: |
           $expected = "${{ needs.build.outputs.sha256 }}"
           $actual = (Get-FileHash drop/jpetstore.war -Algorithm SHA256).Hash.ToLower()
@@ -101,7 +101,7 @@ jobs:
 
       # 롤백 대비. 현재 운영 중인 WAR 를 타임스탬프와 함께 보관한다.
       - name: Backup current WAR
-        shell: pwsh
+        shell: powershell
         env:
           CATALINA: ${{ vars.CATALINA_HOME }}
         run: |
@@ -116,7 +116,7 @@ jobs:
           }
 
       - name: Deploy
-        shell: pwsh
+        shell: powershell
         env:
           CATALINA: ${{ vars.CATALINA_HOME }}
           SVC: ${{ vars.TOMCAT_SERVICE }}
@@ -131,7 +131,7 @@ jobs:
 
       # 배포 성공과 서비스 정상은 다르다. 실제 응답을 확인한다.
       - name: Smoke test
-        shell: pwsh
+        shell: powershell
         run: |
           $ok = $false
           foreach ($i in 1..30) {
@@ -145,6 +145,15 @@ jobs:
           Write-Host "smoke test OK"
 
       - name: Summary
-        shell: pwsh
+        shell: powershell
         run: |
-          "### 테스트이행 완료`n`n| 항목 | 값 |`n| --- | --- |`n| 환경 | test (192.168.10.141) |`n| SHA-256 | ``${{ needs.build.outputs.sha256 }}`` |`n| 커밋 | ``${{ github.sha }}`` |" | Out-File -Append $env:GITHUB_STEP_SUMMARY -Encoding utf8
+          $lines = @(
+            "### 테스트이행 완료",
+            "",
+            "| 항목 | 값 |",
+            "| --- | --- |",
+            "| 환경 | test (192.168.10.141) |",
+            "| SHA-256 | ``${{ needs.build.outputs.sha256 }}`` |",
+            "| 커밋 | ``${{ github.sha }}`` |"
+          )
+          $lines | Add-Content -Path $env:GITHUB_STEP_SUMMARY -Encoding utf8
