@@ -1,0 +1,150 @@
+# development 머지 시 테스트 서버(141) 자동 배포 = 실루엣 테스트이행
+#
+# 빌드는 클라우드 러너에서, 배포는 사내 self-hosted 러너에서 수행한다.
+# 두 단계 사이에 SHA-256 으로 아티팩트 무결성을 검증한다.
+name: CD-Test
+
+on:
+  # development ref 가 갱신될 때 발동한다.
+  # 룰셋이 직접 push 를 막고 있으므로, 이 이벤트는 사실상
+  # "CI 통과 + 승인된 PR 이 머지되었다" 와 같은 의미다.
+  push:
+    branches: [development]
+  workflow_dispatch:
+
+# 주의: pull_request 트리거를 절대 추가하지 않는다.
+# public 저장소 + self-hosted 러너 조합에서 포크 PR 이
+# 사내 VM 에서 임의 코드를 실행할 수 있게 된다.
+
+concurrency:
+  group: cd-test
+  # 배포는 취소하지 않는다. 중간에 끊기면 webapps 가 깨진 상태로 남는다.
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # ── 1단계: 빌드 (클라우드 러너) ──────────────────────────────
+  build:
+    name: build-war
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      sha256: ${{ steps.hash.outputs.sha256 }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Package
+        run: ./mvnw --batch-mode --no-transfer-progress clean package -DskipTests -Dlicense.skip=true
+
+      - name: Compute SHA-256
+        id: hash
+        run: |
+          SUM=$(sha256sum target/jpetstore.war | cut -d' ' -f1)
+          echo "$SUM  jpetstore.war" > target/jpetstore.war.sha256
+          echo "sha256=$SUM" >> "$GITHUB_OUTPUT"
+          {
+            echo "### 빌드 산출물"
+            echo ""
+            echo "| 항목 | 값 |"
+            echo "| --- | --- |"
+            echo "| 파일 | jpetstore.war |"
+            echo "| 크기 | $(stat -c%s target/jpetstore.war) bytes |"
+            echo "| SHA-256 | \`$SUM\` |"
+            echo "| 커밋 | \`${GITHUB_SHA}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jpetstore-war
+          path: |
+            target/jpetstore.war
+            target/jpetstore.war.sha256
+          retention-days: 30
+
+  # ── 2단계: 배포 (사내 러너 141) ──────────────────────────────
+  deploy-test:
+    name: deploy-test
+    needs: build
+    runs-on: [self-hosted, test]
+    timeout-minutes: 15
+    environment:
+      name: test
+      url: http://192.168.10.141:8080/jpetstore/
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: jpetstore-war
+          path: drop
+
+      # 전송 중 아티팩트가 변경되지 않았음을 증명한다.
+      - name: Verify SHA-256
+        shell: pwsh
+        run: |
+          $expected = "${{ needs.build.outputs.sha256 }}"
+          $actual = (Get-FileHash drop/jpetstore.war -Algorithm SHA256).Hash.ToLower()
+          Write-Host "expected : $expected"
+          Write-Host "actual   : $actual"
+          if ($actual -ne $expected) { throw "artifact hash mismatch" }
+          Write-Host "integrity OK"
+
+      # 롤백 대비. 현재 운영 중인 WAR 를 타임스탬프와 함께 보관한다.
+      - name: Backup current WAR
+        shell: pwsh
+        env:
+          CATALINA: ${{ vars.CATALINA_HOME }}
+        run: |
+          $war = Join-Path $env:CATALINA "webapps\jpetstore.war"
+          if (Test-Path $war) {
+            New-Item -ItemType Directory -Force -Path C:\deploy\backup | Out-Null
+            $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+            Copy-Item $war "C:\deploy\backup\jpetstore-$stamp.war"
+            Write-Host "backup: jpetstore-$stamp.war"
+          } else {
+            Write-Host "no previous WAR"
+          }
+
+      - name: Deploy
+        shell: pwsh
+        env:
+          CATALINA: ${{ vars.CATALINA_HOME }}
+          SVC: ${{ vars.TOMCAT_SERVICE }}
+        run: |
+          Stop-Service $env:SVC
+          # 이전 배포가 풀어놓은 디렉터리를 반드시 지운다.
+          # 남아 있으면 Tomcat 이 새 WAR 를 전개하지 않는다.
+          Remove-Item (Join-Path $env:CATALINA "webapps\jpetstore") -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item (Join-Path $env:CATALINA "webapps\jpetstore.war") -Force -ErrorAction SilentlyContinue
+          Copy-Item drop/jpetstore.war (Join-Path $env:CATALINA "webapps\jpetstore.war")
+          Start-Service $env:SVC
+
+      # 배포 성공과 서비스 정상은 다르다. 실제 응답을 확인한다.
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          $ok = $false
+          foreach ($i in 1..30) {
+            try {
+              $r = Invoke-WebRequest "http://localhost:8080/jpetstore/" -UseBasicParsing -TimeoutSec 5
+              if ($r.StatusCode -eq 200) { $ok = $true; break }
+            } catch { }
+            Start-Sleep -Seconds 5
+          }
+          if (-not $ok) { throw "smoke test failed" }
+          Write-Host "smoke test OK"
+
+      - name: Summary
+        shell: pwsh
+        run: |
+          "### 테스트이행 완료`n`n| 항목 | 값 |`n| --- | --- |`n| 환경 | test (192.168.10.141) |`n| SHA-256 | ``${{ needs.build.outputs.sha256 }}`` |`n| 커밋 | ``${{ github.sha }}`` |" | Out-File -Append $env:GITHUB_STEP_SUMMARY -Encoding utf8
