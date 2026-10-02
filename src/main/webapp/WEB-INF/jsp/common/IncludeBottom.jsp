@@ -19,7 +19,7 @@
 
 <div id="Footer">
 
-<div id="PoweredBy">&nbsp;<a href="http://www.mybatis.org">www.mybatis.org</a>
+<div id="PoweredBy"> <a href="https://mybatis.org" target="_blank">MyBatis 공식 사이트</a>
 </div>
 
 <div id="Banner"><c:if test="${sessionScope.accountBean != null }">
