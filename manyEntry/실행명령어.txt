@@ -1,0 +1,1 @@
+powershell -ExecutionPolicy Bypass -File create_dummy_files_split.ps1 -TotalFolders 5 -FilesPerFolder 10000
