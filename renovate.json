@@ -5,8 +5,11 @@
   ],
   "packageRules": [
     {
+      
       "matchPackageNames": ["*"],
-      "allowedVersions": "!/.*jdk5.*/"
+      "allowedVersions": "!/.*jdk5.*/",
+      "test": "test"
     }
   ]
 }
+
